@@ -1,36 +1,71 @@
-import React, { useState } from 'react'
-import { GoTrueClient } from '@supabase/gotrue-js'
+import React, { useEffect, useRef, useState } from 'react'
+import { AuthClient } from '@supabase/auth-js'
 import './tailwind.output.css'
 
-const GOTRUE_URL_AUTOCONFIRM = 'http://localhost:9998'
+const supabaseURL = process.env.REACT_APP_SUPABASE_URL
+const supabaseAnon = process.env.REACT_APP_SUPABASE_ANON_KEY
 
-const auth = new GoTrueClient({
-  url: GOTRUE_URL_AUTOCONFIRM,
+const auth = new AuthClient({
+  url: `${supabaseURL}/auth/v1`,
+  headers: {
+    accept: 'json',
+    apikey: supabaseAnon,
+  },
 })
 
 function App() {
-  let [session, setSession] = useState(auth.session())
+  let [session, setSession] = useState()
   let [email, setEmail] = useState(localStorage.getItem('email') ?? '')
   let [phone, setPhone] = useState(localStorage.getItem('phone') ?? '')
   let [password, setPassword] = useState('')
   let [otp, setOtp] = useState('')
   let [rememberMe, setRememberMe] = useState(false)
 
-  // Keep the session up to date
-  auth.onAuthStateChange((_event, session) => setSession(session))
+  const modalRef = useRef(null)
+  let [showModal, setShowModal] = useState(false)
+
+  async function getSession() {
+    const { data, error } = await auth.getSession()
+    if (error | !data) {
+      setSession('')
+    } else {
+      setSession(data.session)
+    }
+  }
+  useEffect(() => {
+    getSession()
+  }, [])
+
+  useEffect(() => {
+    let { data: subscription } = auth.onAuthStateChange((event, session) => {
+      console.log(event, session)
+      if (event === 'SIGNED_OUT' || event === 'SIGNED_IN') {
+        setSession(session)
+      }
+    })
+
+    return () => {
+      if (subscription.subscription) {
+        subscription.unsubscribe()
+      }
+    }
+  }, [])
 
   async function handleOAuthLogin(provider) {
-    let { error } = await auth.signIn({ provider }, { redirectTo: 'http://localhost:3000/welcome'})
+    let { error } = await auth.signInWithOAuth({
+      provider,
+      options: {
+        redirectTo: 'http://localhost:3001/welcome',
+      },
+    })
     if (error) console.log('Error: ', error.message)
   }
   async function handleVerifyOtp() {
-    let data = await auth.verifyOTP({ phone: phone, token: otp })
-    console.log(data)
+    await auth.verifyOTP({ phone: phone, token: otp, type: 'sms' })
   }
 
   async function handleSendOtp() {
-    let data = await auth.signIn({ phone: phone })
-    console.log(data)
+    await auth.signInWithOtp({ phone: phone, type: 'sms' })
   }
   async function handleEmailSignIn() {
     if (rememberMe) {
@@ -38,29 +73,125 @@ function App() {
     } else {
       localStorage.removeItem('email')
     }
-    let { error, user } = await auth.signIn({ email, password })
-    if (!error && !user) alert('Check your email for the login link!')
+
+    let { error, data } = password
+      ? await auth.signInWithPassword({ email, password })
+      : await auth.signInWithOtp({ email })
+    if (!error && !data) alert('Check your email for the login link!')
     if (error) console.log('Error: ', error.message)
   }
   async function handleEmailSignUp() {
-    let { error } = await auth.signUp({ email, password })
+    let { error } = await auth.signUp({
+      email,
+      password,
+      options: { emailRedirectTo: 'http://localhost:3001/welcome' },
+    })
     if (error) console.log('Error: ', error.message)
   }
   async function handleSignOut() {
     let { error } = await auth.signOut()
-    if (error) console.log('Error: ', error.message)
+    if (error) console.log('Error: ', error)
+  }
+  async function handleSignInAnonymously(data) {
+    let { error } = await auth.signInAnonymously({ options: { data } })
+    if (error) alert(error.message)
   }
   async function forgotPassword() {
     var email = prompt('Please enter your email:')
     if (email === null || email === '') {
       window.alert('You must enter your email.')
     } else {
-      let { error } = await auth.api.resetPasswordForEmail(email)
+      let { error } = await auth.resetPasswordForEmail(email)
       if (error) {
         console.log('Error: ', error.message)
       } else {
         alert('Password recovery email has been sent.')
       }
+    }
+  }
+
+  const showIdentities = () => {
+    return session?.user?.identities?.map((identity) => {
+      return (
+        <div
+          key={identity.identity_id}
+          className="flex flex-row p-2 my-2 bg-gray-200 max-h-100 rounded"
+        >
+          <div className="basis-1/4 p-2">
+            {identity.provider[0].toUpperCase() + identity.provider.slice(1)}
+          </div>
+          <div className="w-full basis-1/2 p-2">{identity?.identity_data?.email}</div>
+          <div>
+            <button
+              className="w-full basis-1/4 p-2 font-medium rounded-md text-white bg-gray-600 hover:bg-gray-500 focus:outline-none focus:border-gray-700 focus:shadow-outline-gray active:bg-gray-700 transition duration-150 ease-in-out"
+              onClick={() => handleUnlinkIdentity(identity)}
+              type="button"
+            >
+              Unlink
+            </button>
+          </div>
+        </div>
+      )
+    })
+  }
+
+  const showLinkingOptions = () => {
+    setShowModal(!showModal)
+    if (showModal && !modalRef.current?.open) {
+      modalRef.current?.showModal()
+    } else {
+      modalRef.current?.close()
+    }
+  }
+
+  const linkingOptionsModal = () => {
+    return (
+      <dialog className="bg-white shadow sm:rounded-lg" ref={modalRef}>
+        <p className="block text-sm font-medium leading-5 text-gray-700">Continue linking with:</p>
+        <div className="mt-6">
+          <div className="m-2">
+            <span className="block w-full rounded-md shadow-sm">
+              <button
+                onClick={() => auth.linkIdentity({ provider: 'github' })}
+                type="button"
+                className="w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-500 focus:outline-none focus:border-indigo-700 focus:shadow-outline-indigo active:bg-indigo-700 transition duration-150 ease-in-out"
+              >
+                GitHub
+              </button>
+            </span>
+          </div>
+          <div className="m-2">
+            <span className="block w-full rounded-md shadow-sm">
+              <button
+                onClick={() => auth.linkIdentity({ provider: 'google' })}
+                type="button"
+                className="w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-500 focus:outline-none focus:border-indigo-700 focus:shadow-outline-indigo active:bg-indigo-700 transition duration-150 ease-in-out"
+              >
+                Google
+              </button>
+            </span>
+          </div>
+        </div>
+        <button
+          className="text-sm font-medium leading-5 text-gray-700"
+          type="button"
+          onClick={showLinkingOptions}
+        >
+          Close
+        </button>
+      </dialog>
+    )
+  }
+
+  async function handleUnlinkIdentity(identity) {
+    let { error } = await auth.unlinkIdentity(identity)
+    if (error) {
+      alert(error.message)
+    } else {
+      alert(`successfully unlinked ${identity.provider} identity`)
+      const { data, error: refreshSessionError } = await auth.refreshSession()
+      if (refreshSessionError) alert(refreshSessionError.message)
+      setSession(data.session)
     }
   }
   return (
@@ -87,6 +218,19 @@ function App() {
               </span>
             </div>
           )}
+        </div>
+
+        <div className="bg-white p-4 shadow sm:rounded-lg  mb-10">
+          <p className="block text-sm font-medium leading-5 text-gray-700">Identities</p>
+          {showIdentities()}
+          <button
+            className="w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-gray-600 hover:bg-gray-500 focus:outline-none focus:border-gray-700 focus:shadow-outline-gray active:bg-gray-700 transition duration-150 ease-in-out"
+            type="button"
+            onClick={showLinkingOptions}
+          >
+            Link Identity
+          </button>
+          {linkingOptionsModal()}
         </div>
 
         <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
@@ -248,6 +392,17 @@ function App() {
                     className="w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-500 focus:outline-none focus:border-indigo-700 focus:shadow-outline-indigo active:bg-indigo-700 transition duration-150 ease-in-out"
                   >
                     Google
+                  </button>
+                </span>
+              </div>
+              <div className="mt-6">
+                <span className="block w-full rounded-md shadow-sm">
+                  <button
+                    onClick={() => handleSignInAnonymously({ color: 'blue' })}
+                    type="button"
+                    className="w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-500 focus:outline-none focus:border-indigo-700 focus:shadow-outline-indigo active:bg-indigo-700 transition duration-150 ease-in-out"
+                  >
+                    Sign In Anonymously
                   </button>
                 </span>
               </div>
